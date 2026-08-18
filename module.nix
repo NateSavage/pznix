@@ -55,10 +55,7 @@ let
         defaultText = literalExpression ''"/var/lib/pznix/''${name}"'';
         description = ''
           Single directory holding everything for this instance: the installed game files, $HOME
-          (and therefore PZ's own Zomboid/ profile directory), and internal state. Deliberately
-          not split into separate "install dir" vs "home dir" locations - see the README for why
-          that split caused real problems upstream. Defaults to a directory scoped to this
-          instance's name, so multiple servers don't collide with each other's files.
+          (and therefore PZ's own Zomboid/ profile directory), and internal state.
         '';
       };
 
@@ -116,7 +113,7 @@ let
       autoUpdate = mkOption {
         type = types.bool;
         default = true;
-        description = "Run steamcmd validate+update on every service start, not just the first.";
+        description = "When true, run steamcmd validate+update on every service start.";
       };
 
       joinPasswordFile = mkOption {
