@@ -76,13 +76,11 @@ let
         default = "pznix";
         description = ''
           Group this instance runs as. Defaults to a single shared "pznix" group across every
-          instance (unlike `user`, which defaults per-instance) - each instance's dataDir is
-          0750 (owner + group readable/traversable), so sharing one group means every
+          server. each server's dataDir is 0750 (owner + group readable/traversable), so sharing one group means every
           pznix-managed server's own process can read into every other one's dataDir too,
           including the plaintext join password in <servername>.ini. Not a risk from unrelated
-          system users (the directory still blocks "other" entirely), but it does mean instances
-          aren't isolated from each other. Give an instance its own distinct group (e.g.
-          "pznix-''${name}") if you want that isolation back.
+          system users, but it does mean pzservers aren't isolated from each other. Give each server its own distinct
+          group (e.g."pznix-''${name}") for full multi server isolation.
         '';
       };
 
