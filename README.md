@@ -40,7 +40,7 @@ outputs = { self, nixpkgs, ... }: {
 ```
 
 ## Configuring A Server
-Now that you've passed the pznix module from the flake into your host's configuration you can setup the module as you like.
+Now that you've passed the pznix module from the flake into your host's configuration you can setup the module as you like. All of the ini and sandbox settings can be found on the [Project Zomboid Wiki](https://pzwiki.net/wiki/Server_settings).
 
 ```nix
 { config, ... }:
@@ -55,16 +55,19 @@ Now that you've passed the pznix module from the flake into your host's configur
     extraIniSettings = {
       PVP = "false";
       MaxPlayers = "16";
+      SleepAllowed = "true"; # you can sleep through the nigh
+      SleepNeeded = "false"; # but you won't need to
     };
     extraSandboxSettings = {
-      SleepAllowed = "true";
-      SleepNeeded = "false";
+      Zombies = "3";   # population level: 1 Insane - 6 None, default 4 Normal
     };
   };
 }
 ```
 
 Keep an eye on what the Project Zomboid instance is doing through the terminal on your server with `journalctl -u pznix-YOUR-SERVER-NAME -f`.
+
+And don't forget to forward the ports on your firewall, Project Zomboid does also seem to support UPNP.
 
 ## Secrets
 
@@ -106,17 +109,17 @@ services.pznix.servers.my-server = {
     PVP = "false";
     MaxPlayers = "16";
     Public = "false";
-  };
-  extraSandboxSettings = { 
     SleepAllowed = "true";
     SleepNeeded = "false";
+  };
+  extraSandboxSettings = { 
+    Zombies = "3";      # population level: 1 Insane - 6 None, default 4 Normal
+    DayLength = "4";    # 1 = 15 min real-time up to 27 = real-time 1:1, default 4 = 1.5 hours
   };
   extraArgs = [ ];
   restartSec = 10;
 };
 ```
-
-Don't forget to forward the ports on your firewall, Project Zomboid does also seem to support UPNP.
 
 ### Running Multiple Servers On One Host
 
