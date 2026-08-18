@@ -116,6 +116,8 @@ services.pznix.servers.my-server = {
 };
 ```
 
+Don't forget to forward the ports on your firewall, Project Zomboid does also seem to support UPNP.
+
 ### Running Multiple Servers On One Host
 
 You can declare as many servers as you like, each will have it's own systemd service (`pznix-<my-server>`), user,
