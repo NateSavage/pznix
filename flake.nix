@@ -7,6 +7,6 @@
 
   outputs = { self, nixpkgs, ... }: {
     nixosModules.default = import ./module.nix;
-    nixosModules.project-zomboid-server = self.nixosModules.default;
+    nixosModules.pznix = self.nixosModules.default;
   };
 }

@@ -3,7 +3,7 @@
 with lib;
 
 let
-  cfg = config.services.project-zomboid-server;
+  cfg = config.services.pznix;
 
   boolStr = b: if b then "true" else "false";
 
@@ -30,7 +30,7 @@ let
         default = true;
         description = ''
           Whether this server instance should actually run. Defaults to true - merely defining
-          an entry under services.project-zomboid-server.servers is enough to run it, unlike the
+          an entry under services.pznix.servers is enough to run it, unlike the
           upstream module this was rewritten from, where a *second*, easy-to-forget enable
           nested under each server was required, and its absence failed completely silently (no
           error, no systemd unit, nothing). Set this to false to keep an instance's config
@@ -56,8 +56,8 @@ let
 
       dataDir = mkOption {
         type = types.path;
-        default = "/var/lib/project-zomboid-server/${name}";
-        defaultText = literalExpression ''"/var/lib/project-zomboid-server/''${name}"'';
+        default = "/var/lib/pznix/${name}";
+        defaultText = literalExpression ''"/var/lib/pznix/''${name}"'';
         description = ''
           Single directory holding everything for this instance: the installed game files, $HOME
           (and therefore PZ's own Zomboid/ profile directory), and internal state. Deliberately
@@ -347,7 +347,7 @@ let
   builtServers = mapAttrs mkServer enabledServers;
 in
 {
-  options.services.project-zomboid-server.servers = mkOption {
+  options.services.pznix.servers = mkOption {
     type = types.attrsOf (types.submodule serverSubmodule);
     default = { };
     description = ''
@@ -408,6 +408,6 @@ in
         (attrValues enabledServers);
     };
 
-    systemd.services = mapAttrs' (name: built: nameValuePair "project-zomboid-server-${name}" built.unit) builtServers;
+    systemd.services = mapAttrs' (name: built: nameValuePair "pznix-${name}" built.unit) builtServers;
   };
 }

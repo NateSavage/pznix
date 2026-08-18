@@ -1,27 +1,21 @@
-# project-zomboid-server
+# pznix
 
-A declarative NixOS module for running one or more [Project Zomboid](https://projectzomboid.com/)
-dedicated servers via SteamCMD.
+NixOS module for running one or more [Project Zomboid](https://projectzomboid.com/)
+dedicated servers via [SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD).
 
-Built from scratch after a long debugging session against
-[ALH477/steamcmd-servers](https://github.com/ALH477/steamcmd-servers), which turned out broken in
-enough different ways - some in the flake itself, some in assumptions that don't hold on NixOS,
-some in the game's own launch scripts - that it was easier to write a clean, PZ-specific module
-than keep patching around someone else's. Every workaround below was discovered the hard way, in
-production, one crash log at a time. Nothing here is speculative.
 
-## Usage
+## Importing This NixOS Flake
 
 ```nix
 {
-  inputs.project-zomboid-server.url = "github:<you>/pznix";
+  inputs.pznix.url = "github:NateSavage/pznix";
 
-  outputs = { self, nixpkgs, project-zomboid-server, ... }: {
+  outputs = { self, nixpkgs, pznix, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
       modules = [
-        project-zomboid-server.nixosModules.default
+        pznix.nixosModules.default
         ({ config, ... }: {
-          services.project-zomboid-server.servers.my-server = {
+          services.pznix.servers.my-server = {
             openFirewall = true;
 
             # See "Secrets" below.
@@ -44,23 +38,74 @@ production, one crash log at a time. Nothing here is speculative.
 }
 ```
 
-Each entry under `services.project-zomboid-server.servers` is an independent server instance,
+Each entry under `services.pznix.servers` is an independent server instance,
 keyed by whatever name you give it (`my-server` above) - that name is also the default for the
 in-game server name, data directory, and system user, so a minimal instance can be as short as:
 
 ```nix
-services.project-zomboid-server.servers.my-server.adminPasswordFile =
+services.pznix.servers.my-server.adminPasswordFile =
   config.sops.secrets."zomboid/my-server/admin-password".path;
 ```
 
-### Running multiple servers on one host
+## Secrets
 
-Just add more entries. Each gets its own systemd service (`project-zomboid-server-<name>`), user,
+Every server needs an admin password file and optionally a join password file. 
+Whatever mechanism supplies these files (sops-nix, agenix, plain `environment.etc`, whatever),
+**the file must be readable by that instance's `user`** (default`pzserver-<name>`);
+sops-nix in particular defaults secrets to `root:root` mode `0400`, so you'll need something like..
+
+```nix
+sops.secrets."zomboid/my-server/admin-password" = {
+  sopsFile = ./secrets.yaml;
+  owner = config.services.pznix.servers.my-server.user;
+};
+```
+
+## Full Config Example
+
+These are the default values provided by the module
+
+```nix
+services.pznix.servers.example = {
+  enable = true;                                          # merely defining this entry is enough
+  serverName = "example";                                 # defaults to the instance name ("example")
+  dataDir = "/var/lib/pznix/example";    # defaults to .../<instance name>
+  user = "pzserver-example";                              # defaults to pzserver-<instance name>
+  group = "pzserver-example";                             # defaults to pzserver-<instance name>
+  openFirewall = true;
+  ports = {
+    game = 16261;
+    extra = [ { port = 16262; protocol = "udp"; } ];
+  };
+  memoryLimit = "8G";
+  autoUpdate = true;
+  joinPasswordFile = null;                                # no join password required
+  adminPasswordFile = /run/secrets/zomboid-example-admin;  # REQUIRED - no default, shown here only
+  pvp = false;
+  pauseWhenEmpty = true;
+  saveIntervalMinutes = 15;
+  sleepAllowed = true;
+  sleepNeeded = false;
+  extraIniSettings = { 
+    
+  };
+  extraSandboxSettings = { 
+    
+  };
+  extraArgs = [ ];
+  restartSec = 10;
+};
+```
+
+
+### Running Multiple Servers On One Host
+
+Just add more entries. Each gets its own systemd service (`pznix-<name>`), user,
 group, and data directory automatically, so they don't collide with each other by default - the
 one thing you must set yourself is distinct ports per instance:
 
 ```nix
-services.project-zomboid-server.servers = {
+services.pznix.servers = {
   main = {
     ports.game = 16261;
     ports.extra = [ { port = 16262; protocol = "udp"; } ];
@@ -75,55 +120,7 @@ services.project-zomboid-server.servers = {
 };
 ```
 
-## Secrets
 
-Every instance needs an admin password file (required - see point 7 below) and optionally a join
-password file. Whatever mechanism supplies these files (sops-nix, agenix, plain
-`environment.etc`, whatever), **the file must be readable by that instance's `user`** (default
-`pzserver-<name>`) - sops-nix in particular defaults secrets to `root:root` mode `0400`, so you'll
-need something like:
-
-```nix
-sops.secrets."zomboid/my-server/admin-password" = {
-  sopsFile = ./secrets.yaml;
-  owner = config.services.project-zomboid-server.servers.my-server.user;
-};
-```
-
-## Maximal config example
-
-Every option, explicitly set to its own default (except `adminPasswordFile`, which has none - PZ
-always requires one, so a value is filled in here just to make this a complete, valid example).
-For instance key `"example"`:
-
-```nix
-services.project-zomboid-server.servers.example = {
-  enable = true;                                          # merely defining this entry is enough
-  serverName = "example";                                 # defaults to the instance name ("example")
-  appId = "380870";
-  dataDir = "/var/lib/project-zomboid-server/example";    # defaults to .../<instance name>
-  user = "pzserver-example";                              # defaults to pzserver-<instance name>
-  group = "pzserver-example";                             # defaults to pzserver-<instance name>
-  openFirewall = false;
-  ports = {
-    game = 16261;
-    extra = [ { port = 16262; protocol = "udp"; } ];
-  };
-  memoryLimit = "8G";
-  autoUpdate = true;
-  joinPasswordFile = null;                                # no join password required
-  adminPasswordFile = /run/secrets/zomboid-example-admin;  # REQUIRED - no default, shown here only
-  pvp = false;
-  pauseWhenEmpty = true;
-  saveIntervalMinutes = 15;
-  sleepAllowed = true;
-  sleepNeeded = false;
-  extraIniSettings = { };
-  extraSandboxSettings = { };
-  extraArgs = [ ];
-  restartSec = 10;
-};
-```
 
 ## Why this module looks the way it does
 
@@ -204,12 +201,8 @@ load-bearing, not decorative:
     command correctly from `serverName` internally, so it isn't possible to make this mistake
     through it.
 
-## Limitations
+## Known Issues
 
-- Anonymous SteamCMD login only (fine for PZ specifically - the dedicated server depot doesn't
-  require an authenticated Steam account).
 - The JVM heap size (`-Xmx`) is controlled by PZ's own `ProjectZomboid64.json`, not this module -
   `memoryLimit` here is only the systemd/cgroup `MemoryMax` ceiling around it.
 - No beta-branch support (`-beta` app_update flag) - add via a fork or ask for it as a feature.
-- No automatic port allocation across instances - if you run more than one server, you pick
-  distinct ports for each yourself (see "Running multiple servers on one host" above).
