@@ -64,7 +64,7 @@ Now that you've passed the pznix module from the flake into your host's configur
 }
 ```
 
-Keep an eye on what the Project Zomboid instance is doing through the terminal on your server with `journalctl -u pznix-a-bad-day -f`.
+Keep an eye on what the Project Zomboid instance is doing through the terminal on your server with `journalctl -u pznix-YOUR-SERVER-NAME -f`.
 
 ## Secrets
 
