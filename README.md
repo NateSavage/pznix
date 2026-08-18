@@ -16,19 +16,21 @@ dedicated servers via [SteamCMD](https://developer.valvesoftware.com/wiki/SteamC
         pznix.nixosModules.default
         ({ config, ... }: {
           services.pznix.servers.my-server = {
-            openFirewall = true;
-
             # See "Secrets" below.
             joinPasswordFile = config.sops.secrets."zomboid/my-server/join-password".path;
             adminPasswordFile = config.sops.secrets."zomboid/my-server/admin-password".path;
 
-            pvp = false;
             pauseWhenEmpty = true;
-            sleepAllowed = true;
-            sleepNeeded = false;
 
+            # Everything else - PVP, player limits, sandbox/difficulty, etc - goes through these
+            # two. See "Configuring gameplay settings" below.
             extraIniSettings = {
+              PVP = "false";
               MaxPlayers = "16";
+            };
+            extraSandboxSettings = {
+              SleepAllowed = "true";
+              SleepNeeded = "false";
             };
           };
         })
@@ -61,17 +63,56 @@ sops.secrets."zomboid/my-server/admin-password" = {
 };
 ```
 
+## Configuring gameplay settings
+
+This module only models the handful of `<servername>.ini` settings it needs to manage itself
+(`pauseWhenEmpty`, `saveIntervalMinutes`) - everything else about how the server plays goes
+through two generic options instead of a long list of named ones:
+
+- **`extraIniSettings`** - server-level settings from `<servername>.ini`: PVP, player limits,
+  visibility, safehouses, mods, etc. Keys and values are exactly what's documented on the
+  [Server settings](https://pzwiki.net/wiki/Server_settings) wiki page, given as plain strings.
+- **`extraSandboxSettings`** - world/difficulty settings from `SandboxVars.lua`: zombie
+  population, loot rarity, XP rate, sleep, day length, etc. Keys and values are exactly what's
+  documented on the [Sandbox options](https://pzwiki.net/wiki/Sandbox_options) wiki page. Values
+  are inserted as literal Lua, so give booleans/numbers unquoted and strings quoted:
+
+```nix
+services.pznix.servers.my-server = {
+  adminPasswordFile = config.sops.secrets."zomboid/my-server/admin-password".path;
+
+  extraIniSettings = {
+    PVP = "false";             # server-level toggle, not sandbox
+    MaxPlayers = "16";
+    Public = "false";
+  };
+
+  extraSandboxSettings = {
+    SleepAllowed = "true";     # unquoted Lua boolean
+    SleepNeeded = "false";
+    Zombies = "3";             # unquoted Lua number
+    WorldItemRemovalList = "\"Base.Vest,Base.Shirt\""; # this one's a genuine Lua string - quoted
+  };
+};
+```
+
+Both are merged with each other's own defaults via Nix `//`, so setting only the keys you care
+about is enough - anything unset keeps whatever PZ itself defaults to (or whatever's already in
+the file from a previous run/manual edit via the in-game admin console).
+
 ## Full Config Example
 
-These are the default values provided by the module
+Every option at its default value (except `adminPasswordFile`, which has none - PZ always
+requires one, so a value is filled in here just to make this a complete, valid example):
 
 ```nix
 services.pznix.servers.example = {
-  enable = true;                                          # merely defining this entry is enough
-  serverName = "example";                                 # defaults to the instance name ("example")
-  dataDir = "/var/lib/pznix/example";    # defaults to .../<instance name>
-  user = "pzserver-example";                              # defaults to pzserver-<instance name>
-  group = "pzserver-example";                             # defaults to pzserver-<instance name>
+  enable = true;                       # merely defining this entry is enough
+  serverName = "example";              # defaults to the instance name ("example")
+  appId = "380870";
+  dataDir = "/var/lib/pznix/example";  # defaults to .../<instance name>
+  user = "pzserver-example";           # defaults to pzserver-<instance name>
+  group = "pzserver-example";          # defaults to pzserver-<instance name>
   openFirewall = true;
   ports = {
     game = 16261;
@@ -79,19 +120,12 @@ services.pznix.servers.example = {
   };
   memoryLimit = "8G";
   autoUpdate = true;
-  joinPasswordFile = null;                                # no join password required
+  joinPasswordFile = null;                                 # no join password required
   adminPasswordFile = /run/secrets/zomboid-example-admin;  # REQUIRED - no default, shown here only
-  pvp = false;
   pauseWhenEmpty = true;
   saveIntervalMinutes = 15;
-  sleepAllowed = true;
-  sleepNeeded = false;
-  extraIniSettings = { 
-    
-  };
-  extraSandboxSettings = { 
-    
-  };
+  extraIniSettings = { };       # see "Configuring gameplay settings" above
+  extraSandboxSettings = { };   # see "Configuring gameplay settings" above
   extraArgs = [ ];
   restartSec = 10;
 };

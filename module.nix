@@ -29,12 +29,7 @@ let
         type = types.bool;
         default = true;
         description = ''
-          Whether this server instance should actually run. Defaults to true - merely defining
-          an entry under services.pznix.servers is enough to run it, unlike the
-          upstream module this was rewritten from, where a *second*, easy-to-forget enable
-          nested under each server was required, and its absence failed completely silently (no
-          error, no systemd unit, nothing). Set this to false to keep an instance's config
-          around without running it.
+          When true this server will start automatically.
         '';
       };
 
@@ -88,7 +83,7 @@ let
 
       openFirewall = mkOption {
         type = types.bool;
-        default = false;
+        default = true;
         description = "Open this instance's configured ports in the firewall.";
       };
 
@@ -144,12 +139,6 @@ let
         '';
       };
 
-      pvp = mkOption {
-        type = types.bool;
-        default = false;
-        description = "Allow player-vs-player damage.";
-      };
-
       pauseWhenEmpty = mkOption {
         type = types.bool;
         default = true;
@@ -162,33 +151,29 @@ let
         description = "Periodic autosave interval, in minutes.";
       };
 
-      sleepAllowed = mkOption {
-        type = types.bool;
-        default = true;
-        description = "Allow players to sleep in beds.";
-      };
-
-      sleepNeeded = mkOption {
-        type = types.bool;
-        default = false;
-        description = "Require players to sleep periodically to avoid fatigue penalties.";
-      };
-
       extraIniSettings = mkOption {
         type = types.attrsOf types.str;
         default = { };
-        example = { MaxPlayers = "16"; Public = "true"; };
-        description = "Additional/override <servername>.ini keys not covered by a named option above.";
+        example = { PVP = "false"; MaxPlayers = "16"; Public = "true"; };
+        description = ''
+          Additional/override <servername>.ini keys not covered by a named option above - this is
+          the primary way to configure most server settings (PVP, MaxPlayers, Public, safehouses,
+          etc). See the Project Zomboid wiki's server settings page for available keys:
+          https://pzwiki.net/wiki/Server_settings
+        '';
       };
 
       extraSandboxSettings = mkOption {
         type = types.attrsOf types.str;
         default = { };
-        example = { Zombies = "3"; };
+        example = { SleepAllowed = "true"; SleepNeeded = "false"; Zombies = "3"; };
         description = ''
-          Additional/override SandboxVars.lua keys not covered by a named option above
-          (difficulty, loot, XP, etc). Values are inserted as literal Lua, so booleans/numbers
-          should be given unquoted (e.g. "3", "true"), strings quoted (e.g. "\"foo\"").
+          SandboxVars.lua keys (difficulty, loot, XP, zombie population, sleep, etc) - this is the
+          primary way to configure world/gameplay settings, this module doesn't model any of them
+          as named options. Values are inserted as literal Lua, so booleans/numbers should be
+          given unquoted (e.g. "3", "true"), strings quoted (e.g. "\"foo\""). See the Project
+          Zomboid wiki's sandbox options page for available keys:
+          https://pzwiki.net/wiki/Sandbox_options
         '';
       };
 
@@ -214,8 +199,11 @@ let
     adminAnswers = "${s.dataDir}/.admin-answers";
 
     # --- <servername>.ini ---
+    # PauseEmpty/SaveWorldEveryMinutes are the only ini settings this module models directly
+    # (they affect this module's own behavior, not just gameplay). Everything else - PVP,
+    # MaxPlayers, Public, safehouses, etc - goes through extraIniSettings; see its option
+    # description and the README for a full example.
     namedIniSettings = {
-      PVP = boolStr s.pvp;
       PauseEmpty = boolStr s.pauseWhenEmpty;
       SaveWorldEveryMinutes = toString s.saveIntervalMinutes;
     };
@@ -228,11 +216,12 @@ let
       (mapAttrsToList (k: v: "${k}=${v}") iniSettings);
 
     # --- <servername>_SandboxVars.lua ---
-    namedSandboxSettings = {
-      SleepAllowed = boolStr s.sleepAllowed;
-      SleepNeeded = boolStr s.sleepNeeded;
-    };
-    sandboxSettings = namedSandboxSettings // s.extraSandboxSettings;
+    # This module doesn't model any sandbox/difficulty settings directly - it's all
+    # extraSandboxSettings (see its option description and the README for a full example).
+    # sandboxSettings can legitimately be empty (nothing set), which iniKeepFilter above never
+    # is (it always has at least Password/PauseEmpty/SaveWorldEveryMinutes) - the awk rule below
+    # is written to tolerate that.
+    sandboxSettings = s.extraSandboxSettings;
     sandboxKeyFilter = concatStringsSep "|" (builtins.attrNames sandboxSettings);
     sandboxPrintStmts = concatStringsSep " "
       (mapAttrsToList (k: v: ''print "    ${k} = ${v},";'') sandboxSettings);
@@ -284,7 +273,7 @@ let
         fi
         awk '
           /^[ \t]*SandboxVars[ \t]*=[ \t]*\{/ { print; ${sandboxPrintStmts} next }
-          /^[ \t]*(${sandboxKeyFilter})[ \t]*=/ { next }
+          ${optionalString (sandboxSettings != { }) ''/^[ \t]*(${sandboxKeyFilter})[ \t]*=/ { next }''}
           { print }
         ' "${lua}" > "${lua}.tmp"
         mv "${lua}.tmp" "${lua}"
