@@ -147,3 +147,5 @@ services.pznix.servers = {
 - The JVM heap size (`-Xmx`) is controlled by PZ's own `ProjectZomboid64.json`, not this module -
   `memoryLimit` here is only the systemd/cgroup `MemoryMax` ceiling around it.
 - No beta-branch support (`-beta` app_update flag) - add via a fork or ask for it as a feature.
+- Server instances share a group by default, you can assign them to separate groups, but by default if a Project Zomboid server was exploited, it could read the plaintext configuration files of your other server instances hosted on the same machine.
+^ this was intentional to make configuration of shared secrets easier for nix noobs, but I'm on the fence about if it was actually a good idea.
