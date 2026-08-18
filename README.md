@@ -123,8 +123,7 @@ Don't forget to forward the ports on your firewall, Project Zomboid does also se
 You can declare as many servers as you like, each will have it's own systemd service (`pznix-<my-server>`), user,
 and data directory automatically. You only need to set unique ports and an admin password for each one.
 
-Note that `group` defaults to a single shared `pznix` group across *every* instance (not
-per-instance like `user`) - see that option's description for what that trades away.
+Note that `group` defaults to a single shared `pznix` group across *every* instance.
 
 ```nix
 services.pznix.servers = {
