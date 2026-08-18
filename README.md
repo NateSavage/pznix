@@ -64,6 +64,8 @@ Now that you've passed the pznix module from the flake into your host's configur
 }
 ```
 
+Keep an eye on what the Project Zomboid instance is doing through the terminal on your server with `journalctl -u pznix-a-bad-day -f`.
+
 ## Secrets
 
 Every server needs an admin password file, I reccomend you use a secrets management tool like [SOPS](https://github.com/mic92/sops-nix) to create and manage the file so that it never accidently ends up visible somewhere it shouldn't be. But you can just create a file somewhere and point the config at it so long as the user that's created for your server has read permission for the file.
