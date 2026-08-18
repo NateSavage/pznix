@@ -200,9 +200,11 @@ let
     ini = "${s.dataDir}/Zomboid/Server/${s.serverName}.ini";
     lua = "${s.dataDir}/Zomboid/Server/${s.serverName}_SandboxVars.lua";
     adminAnswers = "${s.dataDir}/.admin-answers";
-    # Non-empty once PZ has created the world's db (zombie.network.ServerWorldDatabase)
-    # the one-time signal that the admin account already exists and won't be prompted for again.
-    worldDb = "${s.dataDir}/Zomboid/Saves/Multiplayer/${s.serverName}/db";
+    # Exists once PZ has created the world's db (zombie.network.ServerWorldDatabase) - the
+    # one-time signal that the admin account already exists and won't be prompted for again.
+    # Confirmed against a live server's actual layout - it's Zomboid/db/<name>.db, a plain file
+    # directly under Zomboid/db/, NOT nested under Saves/Multiplayer/<name>/ (that was wrong).
+    worldDb = "${s.dataDir}/Zomboid/db/${s.serverName}.db";
 
     # --- <servername>.ini ---
     # PauseEmpty/SaveWorldEveryMinutes are the only ini settings this module models directly
@@ -290,14 +292,14 @@ let
       script = ''
         cd "${s.dataDir}"
         # PZ only prompts for the admin password on stdin the *first* time it creates the
-        # world's db (zombie.network.ServerWorldDatabase) - once db/ has content, it won't
+        # world's db (zombie.network.ServerWorldDatabase) - once that db file exists, it won't
         # prompt again. Feeding the answers file unconditionally on every start (as this used
         # to) meant that on every restart *after* the first, those two leftover lines got read
         # by PZ's general server-console command reader instead and logged verbatim to the
         # journal ("command entered via server console (System.in): '<password>'") - i.e. the
         # real admin password in plaintext in the log, every restart, forever. Only redirect
         # stdin from the answers file when the db doesn't exist yet.
-        if [ -d "${worldDb}" ] && [ -n "$(ls -A "${worldDb}" 2>/dev/null)" ]; then
+        if [ -f "${worldDb}" ]; then
           exec ./start-server.sh -servername ${escapeShellArg s.serverName} ${escapeShellArgs s.extraArgs} < /dev/null
         else
           exec ./start-server.sh -servername ${escapeShellArg s.serverName} ${escapeShellArgs s.extraArgs} < "${adminAnswers}"
