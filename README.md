@@ -5,10 +5,9 @@ dedicated servers via [SteamCMD](https://developer.valvesoftware.com/wiki/SteamC
 
 
 ## Importing This NixOS Flake
+Or how to import any NixOS flake.
 
-Add the input and wire the module into your host's module list - this part is typically just
-`flake.nix` itself, with the actual server config living elsewhere alongside the rest of that
-host's config:
+Add as an input for your flake, and pass the module down to your host config.
 
 ```nix
 {
@@ -25,25 +24,34 @@ host's config:
 }
 ```
 
-## Configuring A Server
+you can also import a flake without exposing it as an output.
 
-`pznix.nixosModules.default` just adds the `services.pznix.servers` option - it doesn't require
-any particular file layout, so this goes wherever the rest of that host's config lives (e.g.
-`hosts/myhost/default.nix` above):
+```nix
+outputs = { self, nixpkgs, ... }: {
+                        # ^ no longer declared as an output
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        inputs.pznix.nixosModules.default
+        # ^ now the flake needs to be referenced from the flake's input
+        ./hosts/myhost/default.nix
+      ];
+    };
+  };
+```
+
+## Configuring A Server
+Now that you've passed the pznix module from the flake into your host's configuration you can setup the module as you like.
 
 ```nix
 { config, ... }:
 {
+  # your server is enabled by default when defined
   services.pznix.servers.my-server = {
-    # See "Secrets" below.
-    joinPasswordFile = config.sops.secrets."zomboid/my-server/join-password".path;
+    # See "Secrets" below. all Project Zomboid Servers require an admin password.
     adminPasswordFile = config.sops.secrets."zomboid/my-server/admin-password".path;
 
     pauseWhenEmpty = true;
 
-    # Everything else - PVP, player limits, sandbox/difficulty, etc - goes through these two
-    # (extraIniSettings from https://pzwiki.net/wiki/Server_settings, extraSandboxSettings from
-    # https://pzwiki.net/wiki/Sandbox_options; see the Full Config Example below for more).
     extraIniSettings = {
       PVP = "false";
       MaxPlayers = "16";
@@ -56,33 +64,36 @@ any particular file layout, so this goes wherever the rest of that host's config
 }
 ```
 
-Each entry under `services.pznix.servers` is an independent server instance, keyed by whatever
-name you give it (`my-server` above) - that name is also the default for the in-game server
-name, data directory, and system user, so a minimal instance can be as short as:
-
-```nix
-services.pznix.servers.my-server.adminPasswordFile =
-  config.sops.secrets."zomboid/my-server/admin-password".path;
-```
-
 ## Secrets
 
-Every server needs an admin password file and optionally a join password file. 
-Whatever mechanism supplies these files (sops-nix, agenix, plain `environment.etc`, whatever),
-**the file must be readable by that instance's `user`** (default`pzserver-<name>`);
-sops-nix in particular defaults secrets to `root:root` mode `0400`, so you'll need something like..
+Every server needs an admin password file, and optionally a join password file.
+**The file must be readable by that instance's `user`** (default `pzserver-<name>`) - and must
+**not** be something Nix writes as plaintext itself (`environment.etc.<name>.text`, a
+`systemd.tmpfiles.rules` entry with an inline argument, etc) - those land the secret in the
+world-readable Nix store, the exact problem described in point 7 of "Why this module looks the
+way it does" above.
 
-```nix
-sops.secrets."zomboid/my-server/admin-password" = {
-  sopsFile = ./secrets.yaml;
-  owner = config.services.pznix.servers.my-server.user;
-};
+The simplest way to avoid that, with no secrets-management tool at all: create the file directly
+on the host, outside of Nix, and just point the option at its path.
+
+```bash
+install -d -m 0750 -o pzserver-my-server -g pzserver-my-server /var/lib/pznix-secrets
+printf '%s' 'your-admin-password' > /var/lib/pznix-secrets/my-server-admin
+chown pzserver-my-server:pzserver-my-server /var/lib/pznix-secrets/my-server-admin
+chmod 0400 /var/lib/pznix-secrets/my-server-admin
 ```
 
-## Full Config Example
+```nix
+services.pznix.servers.my-server.adminPasswordFile = "/var/lib/pznix-secrets/my-server-admin";
+```
 
-Every option at its default value (except `adminPasswordFile`, which has none - PZ always
-requires one, so a value is filled in here just to make this a complete, valid example):
+The tradeoff: this file isn't reproduced by your flake the way the rest of the config is - if you
+reprovision the host from scratch, you have to recreate it by hand. If you'd rather have secrets
+survive a full rebuild without a manual step, use a real secrets tool instead (sops-nix, agenix,
+etc) - see that tool's own docs for how to grant a specific NixOS user read access to a decrypted
+secret (with sops-nix, that's the secret's `owner` field).
+
+## Detailed Config Example
 
 ```nix
 services.pznix.servers.my-server = {
@@ -119,9 +130,8 @@ services.pznix.servers.my-server = {
 
 ### Running Multiple Servers On One Host
 
-Just add more entries. Each gets its own systemd service (`pznix-<name>`), user,
-group, and data directory automatically, so they don't collide with each other by default - the
-one thing you must set yourself is distinct ports per instance:
+You can declare as many servers as you like, each will have it's own systemd service (`pznix-<my-server>`), user,
+group, and data directory automatically. You only need to set unique ports and an admin password for each one.
 
 ```nix
 services.pznix.servers = {
