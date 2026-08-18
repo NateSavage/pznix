@@ -66,32 +66,18 @@ Now that you've passed the pznix module from the flake into your host's configur
 
 ## Secrets
 
-Every server needs an admin password file, and optionally a join password file.
-**The file must be readable by that instance's `user`** (default `pzserver-<name>`) - and must
-**not** be something Nix writes as plaintext itself (`environment.etc.<name>.text`, a
-`systemd.tmpfiles.rules` entry with an inline argument, etc) - those land the secret in the
-world-readable Nix store, the exact problem described in point 7 of "Why this module looks the
-way it does" above.
-
-The simplest way to avoid that, with no secrets-management tool at all: create the file directly
-on the host, outside of Nix, and just point the option at its path.
+Every server needs an admin password file, I reccomend you use a secrets management tool like [SOPS](https://github.com/mic92/sops-nix) to create and manage the file so that it never accidently ends up visible somewhere it shouldn't be. But you can just create a file somewhere and point the config at it so long as the user that's created for your server has read permission for the file.
 
 ```bash
-install -d -m 0750 -o pzserver-my-server -g pzserver-my-server /var/lib/pznix-secrets
-printf '%s' 'your-admin-password' > /var/lib/pznix-secrets/my-server-admin
-chown pzserver-my-server:pzserver-my-server /var/lib/pznix-secrets/my-server-admin
-chmod 0400 /var/lib/pznix-secrets/my-server-admin
+sudo mkdir -p /run/secrets
+printf '%s' 'your-admin-password' | sudo tee /run/secrets/zomboid-admin-password > /dev/null
+sudo chown nobody:pznix /run/secrets/zomboid-admin-password
+sudo chmod 0400 /run/secrets/zomboid-admin-password
 ```
 
 ```nix
-services.pznix.servers.my-server.adminPasswordFile = "/var/lib/pznix-secrets/my-server-admin";
+services.pznix.servers.my-server.adminPasswordFile = "/run/secrets/zomboid-admin-password";
 ```
-
-The tradeoff: this file isn't reproduced by your flake the way the rest of the config is - if you
-reprovision the host from scratch, you have to recreate it by hand. If you'd rather have secrets
-survive a full rebuild without a manual step, use a real secrets tool instead (sops-nix, agenix,
-etc) - see that tool's own docs for how to grant a specific NixOS user read access to a decrypted
-secret (with sops-nix, that's the secret's `owner` field).
 
 ## Detailed Config Example
 
@@ -102,7 +88,7 @@ services.pznix.servers.my-server = {
   appId = "380870";
   dataDir = "/var/lib/pznix/my-server";  # defaults to .../<instance name>
   user = "pzserver-my-server";           # defaults to pzserver-<instance name>
-  group = "pzserver-my-server";          # defaults to pzserver-<instance name>
+  group = "pznix";                       # shared across every instance by default - see below
   openFirewall = true;
   ports = {
     game = 16261;
@@ -110,8 +96,8 @@ services.pznix.servers.my-server = {
   };
   memoryLimit = "8G";
   autoUpdate = true;
-  joinPasswordFile = null;                                 # no join password required
-  adminPasswordFile = /run/secrets/zomboid-example-admin;  # REQUIRED - no default, shown here only
+  joinPasswordFile = null;
+  adminPasswordFile = /run/secrets/zomboid-admin-password;  # REQUIRED, there is no default
   pauseWhenEmpty = true;
   saveIntervalMinutes = 15;
   extraIniSettings = { 
@@ -131,7 +117,10 @@ services.pznix.servers.my-server = {
 ### Running Multiple Servers On One Host
 
 You can declare as many servers as you like, each will have it's own systemd service (`pznix-<my-server>`), user,
-group, and data directory automatically. You only need to set unique ports and an admin password for each one.
+and data directory automatically. You only need to set unique ports and an admin password for each one.
+
+Note that `group` defaults to a single shared `pznix` group across *every* instance (not
+per-instance like `user`) - see that option's description for what that trades away.
 
 ```nix
 services.pznix.servers = {

@@ -66,16 +66,24 @@ let
         description = ''
           User this instance runs as. Defaults to a per-instance user (rather than one shared
           "pzserver" account) so multiple servers don't collide - if you deliberately point two
-          instances at the same user/group, you're responsible for keeping their dataDirs from
+          instances at the same user, you're responsible for keeping their dataDirs from
           overlapping too.
         '';
       };
 
       group = mkOption {
         type = types.str;
-        default = "pzserver-${name}";
-        defaultText = literalExpression ''"pzserver-''${name}"'';
-        description = "Group this instance runs as.";
+        default = "pznix";
+        description = ''
+          Group this instance runs as. Defaults to a single shared "pznix" group across every
+          instance (unlike `user`, which defaults per-instance) - each instance's dataDir is
+          0750 (owner + group readable/traversable), so sharing one group means every
+          pznix-managed server's own process can read into every other one's dataDir too,
+          including the plaintext join password in <servername>.ini. Not a risk from unrelated
+          system users (the directory still blocks "other" entirely), but it does mean instances
+          aren't isolated from each other. Give an instance its own distinct group (e.g.
+          "pznix-''${name}") if you want that isolation back.
+        '';
       };
 
       openFirewall = mkOption {
@@ -338,11 +346,11 @@ in
     default = { };
     description = ''
       Project Zomboid dedicated server instances to run, keyed by an arbitrary instance name
-      (used by default to derive the systemd unit name, data directory, user/group, and PZ
-      server profile name - all independently overridable per instance). Each entry with
-      `enable = true` (the default) gets its own fully independent systemd service, user, and
-      data directory, so multiple servers can run on one host without colliding, as long as you
-      give each a distinct port.
+      (used by default to derive the systemd unit name, data directory, user, and PZ server
+      profile name - all independently overridable per instance; see the `group` option for why
+      it isn't in that list). Each entry with `enable = true` (the default) gets its own fully
+      independent systemd service, user, and data directory, so multiple servers can run on one
+      host without colliding, as long as you give each a distinct port.
     '';
   };
 
