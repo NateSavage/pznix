@@ -7,6 +7,8 @@ let
 
   boolStr = b: if b then "true" else "false";
 
+  workshopAppId = "108600"; # project zomboid game client ID
+
   enabledServers = filterAttrs (_: s: s.enable) cfg.servers;
 
   portSubmodule = types.submodule {
@@ -180,6 +182,60 @@ let
         '';
       };
 
+      mods = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Extra/manually-placed PZ internal Mod IDs (from each mod's mod.info) to enable, on
+          top of whatever's auto-discovered from workshopItems/collectionIds downloads - most
+          setups with Workshop mods won't need this. Populates the ini's Mods= list together
+          with the auto-discovered set (deduplicated). Useful for a mod you've placed by hand
+          under dataDir/Zomboid/mods/<ModID> instead of through the Workshop, or if this is
+          the only way you want to enable mods at all (workshopItems/collectionIds both
+          empty).
+        '';
+      };
+
+      excludeMods = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Mod IDs to force-disable even if present among downloaded/auto-discovered mods -
+          for when a Workshop item or a collectionIds entry bundles a mod you don't want
+          active but still want the rest of that item downloaded.
+        '';
+      };
+
+      workshopItems = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Steam Workshop item IDs (numeric) to fetch via steamcmd's +workshop_download_item
+          before every start (subject to autoUpdate, same as the base game install). Merged
+          with whatever collectionIds resolve to (deduplicated), and used to populate the
+          ini's WorkshopItems= list. Only public items work - the download uses the same
+          anonymous login as the base game install. Downloaded content lands under
+          dataDir/steamapps/workshop/content/108600/<id>, alongside the server install
+          itself, which PZ resolves automatically. You don't need to separately list each
+          item's internal Mod ID - see `mods` above, enabled mods are auto-discovered from
+          what's actually downloaded.
+        '';
+      };
+
+      collectionIds = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Steam Workshop Collection IDs to resolve into their member item IDs before every
+          start (subject to autoUpdate), merged with workshopItems above. A collection has no
+          downloadable content of its own - steamcmd can't fetch a collection ID directly -
+          so this module resolves it first via Steam's public
+          ISteamRemoteStorage/GetCollectionDetails Web API (no API key needed for public
+          collections) and downloads its member items same as if you'd listed them in
+          workshopItems yourself. Only public collections work.
+        '';
+      };
+
       extraArgs = mkOption {
         type = types.listOf types.str;
         default = [ ];
@@ -205,6 +261,20 @@ let
     # Confirmed against a live server's actual layout - it's Zomboid/db/<name>.db, a plain file
     # directly under Zomboid/db/, NOT nested under Saves/Multiplayer/<name>/ (that was wrong).
     worldDb = "${s.dataDir}/Zomboid/db/${s.serverName}.db";
+    # Where steamcmd's +workshop_download_item lands content - used to verify each item
+    # actually downloaded, since steamcmd is known to sometimes exit 0 on a failed/partial
+    # download rather than a nonzero status - and to auto-discover which Mod IDs to enable
+    # (each item's mods/<ModID> subdirectory name) without maintaining a separate list.
+    workshopContentDir = "${s.dataDir}/steamapps/workshop/content/${workshopAppId}";
+    # Persisted, one ID per line: the fully resolved (collectionIds expanded + workshopItems)
+    # and *verified-downloaded* set of Workshop item IDs from the most recent successful
+    # preStart resolution. Read back on every start (even one where autoUpdate skipped
+    # re-resolving) to populate the ini's WorkshopItems= and to know what to scan for mods.
+    workshopIdsFile = "${s.dataDir}/.workshop-items";
+    # Persisted, semicolon-joined: the derived Mods= value (auto-discovered mods from
+    # workshopIdsFile's content, plus `mods`, minus `excludeMods`). Same persist-and-reread
+    # reasoning as workshopIdsFile.
+    derivedModsFile = "${s.dataDir}/.derived-mods";
 
     # --- <servername>.ini ---
     # PauseEmpty/SaveWorldEveryMinutes are the only ini settings this module models directly
@@ -215,8 +285,16 @@ let
       PauseEmpty = boolStr s.pauseWhenEmpty;
       SaveWorldEveryMinutes = toString s.saveIntervalMinutes;
     };
-    iniSettings = namedIniSettings // s.extraIniSettings;
-    iniManagedKeys = (optional (s.joinPasswordFile != null) "Password") ++ (builtins.attrNames iniSettings);
+    # Mods/WorkshopItems are deliberately excluded here even if set via extraIniSettings -
+    # both are exclusively owned by the dedicated mods/workshopItems/collectionIds options
+    # now, computed at runtime in preStart (see workshopIdsFile/derivedModsFile above): unlike
+    # everything else in iniSettings, neither is knowable at Nix eval time, since Mods depends
+    # on what's actually discovered under downloaded Workshop content and WorkshopItems
+    # depends on collectionIds resolution.
+    iniSettings = removeAttrs (namedIniSettings // s.extraIniSettings) [ "Mods" "WorkshopItems" ];
+    iniManagedKeys = (optional (s.joinPasswordFile != null) "Password")
+      ++ [ "Mods" "WorkshopItems" ]
+      ++ (builtins.attrNames iniSettings);
     iniKeepFilter = concatStringsSep "|" iniManagedKeys;
     # Shell-quoted "KEY=VALUE" words, one per printf arg in preStart - deliberately not a
     # heredoc, since Nix's multi-line-string dedent doesn't play well with those.
@@ -244,17 +322,101 @@ let
       wants = [ "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
 
-      path = with pkgs; [ coreutils gawk gnugrep gnutar gzip steamcmd ];
+      path = with pkgs; [ coreutils gawk gnugrep gnutar gzip steamcmd curl jq ];
 
       environment.HOME = s.dataDir;
 
       preStart = ''
         if [ "${boolStr s.autoUpdate}" = "true" ] || [ ! -f "${s.dataDir}/.installed" ]; then
           ${pkgs.steamcmd}/bin/steamcmd +force_install_dir "${s.dataDir}" +login anonymous +app_update ${s.appId} validate +quit
+          ${optionalString (s.workshopItems != [ ] || s.collectionIds != [ ]) ''
+            # Resolves collectionIds + workshopItems into workshopIdsFile and downloads every
+            # item, all in one attempt. Returns failure (without aborting the script - see the
+            # `until` loop below) if any collection fails to resolve or any item fails to
+            # download, so a bad attempt never gets to commit a partial/stale workshopIdsFile.
+            resolve_and_download() {
+              : > "${workshopIdsFile}.tmp"
+              ${concatMapStringsSep "\n      " (id: ''printf '%s\n' ${escapeShellArg id} >> "${workshopIdsFile}.tmp"'') s.workshopItems}
+
+              ${concatMapStringsSep "\n      " (cid: ''
+                # Collections aren't downloadable content themselves - resolve via Steam's
+                # public Web API into member item IDs first. Fail loud (return 1, picked up
+                # by the retry loop) on any HTTP error or a response that doesn't cleanly
+                # resolve, rather than silently treating a bad/inaccessible collection ID as
+                # "zero members".
+                # cid is interpolated bare (not via escapeShellArg) below: both spots are
+                # already inside a bash-quoted string (double quotes for --data-urlencode,
+                # single quotes for the jq program), so wrapping it in shell quotes of its
+                # own would corrupt the surrounding quoting rather than protect it -
+                # collectionIds entries are trusted, admin-authored, plain numeric IDs.
+                ${pkgs.curl}/bin/curl -fsS -X POST "https://api.steampowered.com/ISteamRemoteStorage/GetCollectionDetails/v1/" \
+                  --data-urlencode "collectioncount=1" \
+                  --data-urlencode "publishedfileids[0]=${cid}" \
+                  -o "${s.dataDir}/.collection-details.json" || return 1
+                ${pkgs.jq}/bin/jq -r '
+                  .response.collectiondetails[0] as $c
+                  | if $c.result != 1 then error("collection ${cid} did not resolve (result=" + ($c.result | tostring) + ")")
+                    else ($c.children // [])[].publishedfileid end
+                ' "${s.dataDir}/.collection-details.json" >> "${workshopIdsFile}.tmp" || return 1
+              '') s.collectionIds}
+              rm -f "${s.dataDir}/.collection-details.json"
+
+              sort -u -o "${workshopIdsFile}.tmp" "${workshopIdsFile}.tmp"
+
+              set -- +force_install_dir "${s.dataDir}" +login anonymous
+              while IFS= read -r id; do
+                set -- "$@" +workshop_download_item ${workshopAppId} "$id" validate
+              done < "${workshopIdsFile}.tmp"
+              # steamcmd's own exit code isn't trustworthy (known to report success on a
+              # failed/partial download) - `|| true` here, verify by directory presence below.
+              ${pkgs.steamcmd}/bin/steamcmd "$@" +quit || true
+
+              while IFS= read -r id; do
+                [ -d "${workshopContentDir}/$id" ] || return 1
+              done < "${workshopIdsFile}.tmp"
+
+              mv "${workshopIdsFile}.tmp" "${workshopIdsFile}"
+            }
+
+            attempt=1
+            until resolve_and_download; do
+              if [ "$attempt" -ge 3 ]; then
+                echo "pznix (${s.serverName}): giving up resolving/downloading Workshop items after $attempt attempts" >&2
+                exit 1
+              fi
+              attempt=$((attempt + 1))
+              echo "pznix (${s.serverName}): Workshop resolution/download incomplete, retrying (attempt $attempt/3)..." >&2
+            done
+          ''}
           touch "${s.dataDir}/.installed"
         fi
 
         mkdir -p "$(dirname "${ini}")"
+
+        # --- Mods=/WorkshopItems= (see workshopIdsFile/derivedModsFile above for why these
+        # are computed here instead of in iniStaticArgs) ---
+        ${optionalString (s.mods != [ ] || s.workshopItems != [ ] || s.collectionIds != [ ]) ''
+          {
+            if [ -f "${workshopIdsFile}" ]; then
+              while IFS= read -r id; do
+                if [ -d "${workshopContentDir}/$id/mods" ]; then
+                  for d in "${workshopContentDir}/$id/mods/"*/; do
+                    [ -d "$d" ] && basename "$d"
+                  done
+                fi
+              done < "${workshopIdsFile}"
+            fi
+            ${concatMapStringsSep "\n        " (m: ''printf '%s\n' ${escapeShellArg m}'') s.mods}
+          } | sort -u ${optionalString (s.excludeMods != [ ]) ("| grep -v -x -F " + concatMapStringsSep " " (m: "-e " + escapeShellArg m) s.excludeMods)} \
+            | paste -sd';' - > "${derivedModsFile}.tmp"
+          # paste on an empty selection still exits 0 and produces an empty file - fine, an
+          # empty Mods= is exactly what "auto-discovered nothing" should mean.
+          mv "${derivedModsFile}.tmp" "${derivedModsFile}"
+        ''}
+        mods_line=""
+        [ -f "${derivedModsFile}" ] && mods_line="$(cat "${derivedModsFile}")"
+        workshop_items_line=""
+        [ -f "${workshopIdsFile}" ] && workshop_items_line="$(paste -sd';' "${workshopIdsFile}")"
 
         # --- <servername>.ini ---
         ${optionalString (s.joinPasswordFile != null) ''
@@ -265,6 +427,8 @@ let
             grep -v -E '^(${iniKeepFilter})=' "${ini}" || true
           fi
           ${optionalString (s.joinPasswordFile != null) ''printf 'Password=%s\n' "$join_pw"''}
+          printf 'Mods=%s\n' "$mods_line"
+          printf 'WorkshopItems=%s\n' "$workshop_items_line"
           printf '%s\n' ${iniStaticArgs}
         } > "${ini}.tmp"
         mv "${ini}.tmp" "${ini}"

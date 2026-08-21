@@ -83,14 +83,35 @@ sudo chmod 0400 /run/secrets/zomboid-admin-password
 ```nix
 services.pznix.servers.my-server.adminPasswordFile = "/run/secrets/zomboid-admin-password";
 ```
+## Mods
+
+You can declare mods from the steam workshop to have them automatically downloaded both for your server, and for player's
+when the connect. Only public Workshop items/collections can be automatically downloaded currently.
+ 
+```nix
+services.pznix.servers.my-server = {
+
+  # mods are downloaded and kept up to date automatically using steamcmd
+  # you should be able to find them at <dataDir>/steamapps/workshop/content/108600/<workshopId>
+  workshopItems = [ "2189435314" ];
+
+  # you can also add an entire steam workshop collections by their id
+  # these will be combined with manually added workshop items
+  collectionIds = [ "3011234567" ];
+
+  # use a workshop id to remove mods from a collection you follow without changing the rest of the collection
+  excludeMods = [ "2189435314" ];
+};
+```
+
+injecting configuration files for mods here is still on the todo list.
 
 ## Detailed Config Example
 
 ```nix
 services.pznix.servers.my-server = {
   enable = true;
-  serverName = "my-server";              # defaults to the instance name ("my-server")
-  appId = "380870";
+  serverName = "my-server";
   dataDir = "/var/lib/pznix/my-server";  # defaults to .../<instance name>
   user = "pzserver-my-server";           # defaults to pzserver-<instance name>
   group = "pznix";                       # shared across every instance by default - see below
@@ -116,7 +137,11 @@ services.pznix.servers.my-server = {
     Zombies = "3";      # population level: 1 Insane - 6 None, default 4 Normal
     DayLength = "4";    # 1 = 15 min real-time up to 27 = real-time 1:1, default 4 = 1.5 hours
   };
-  extraArgs = [ ];
+  mods = [ ];
+  excludeMods = [ ];  
+  workshopItems = [ ]; 
+  collectionIds = [ ]; 
+  extraArgs = [ ];      # extra startup arguments handed to the project zomboid server directly
   restartSec = 10;
 };
 ```
@@ -139,7 +164,7 @@ services.pznix.servers = {
     ports.game = 16263;
     ports.extra = [ { port = 16264; protocol = "udp"; } ];
     adminPasswordFile = config.sops.secrets."zomboid/modded/admin-password".path;
-    extraIniSettings.Mods = "SomeMod";
+    workshopItems = [ "2559634234" ];
   };
 };
 ```
