@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -94,6 +95,24 @@ def fetch_time_updated(ids: list[str]) -> dict[str, int]:
     }
 
 
+def prune_stale_content(content_dir: Path, keep_ids: set[str]) -> None:
+    # Drop anything downloaded under content_dir that isn't in this round's
+    # resolved id set - dropped from workshopItems/collectionIds directly,
+    # or a collection member Steam removed upstream. steamcmd only ever
+    # adds content we ask for; without this, a mod pulled from a
+    # collection stays fully installed (and its ID could later get reused
+    # for something unrelated and get picked back up by derive_mods) even
+    # though it no longer appears in Mods=/WorkshopItems=. Only touches
+    # directories that look like a Workshop item ID (all-digits) -
+    # content_dir is exclusively ours, but this keeps the blast radius
+    # obvious even so.
+    if not content_dir.is_dir():
+        return
+    for entry in content_dir.iterdir():
+        if entry.is_dir() and entry.name.isdigit() and entry.name not in keep_ids:
+            shutil.rmtree(entry)
+
+
 def resolve_and_download(cfg: dict) -> None:
     server = cfg["serverName"]
     paths = cfg["paths"]
@@ -146,6 +165,8 @@ def resolve_and_download(cfg: dict) -> None:
             f"{', '.join(missing)}"
         )
 
+    prune_stale_content(content_dir, set(ids))
+
     confirmed_times = {i: new_times[i] for i in ids if i in new_times}
     atomic_write(times_path, json.dumps(confirmed_times))
     atomic_write(Path(paths["workshopIdsFile"]), json.dumps(ids))
@@ -194,6 +215,14 @@ def install_and_update(cfg: dict) -> None:
                 "after 3 attempts",
             )
             raise last_error
+    else:
+        # No Workshop content configured (any more) - drop whatever was
+        # previously downloaded/tracked rather than leaving it orphaned,
+        # same as resolve_and_download does for individual items dropped
+        # from a still-configured collection.
+        prune_stale_content(Path(cfg["paths"]["workshopContentDir"]), set())
+        Path(cfg["paths"]["workshopIdsFile"]).unlink(missing_ok=True)
+        Path(cfg["paths"]["workshopTimesFile"]).unlink(missing_ok=True)
 
     installed_marker.touch()
 
