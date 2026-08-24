@@ -11,6 +11,21 @@ let
 
   enabledServers = filterAttrs (_: s: s.enable) cfg.servers;
 
+  # The scripting side of this module - preStart, launch, world-wipe, and the
+  # update-check restart - is plain Python now, not Nix-interpolated bash: see
+  # ./scripts/*.py. Each is fully static (all per-instance values flow in via
+  # the JSON config below, referenced through $PZNIX_CONFIG), so every
+  # instance shares the same one build of each script rather than each
+  # getting its own copy.
+  prestartScript = pkgs.writers.writePython3 "pznix-prestart" { }
+    (builtins.readFile ./scripts/prestart.py);
+  startScript = pkgs.writers.writePython3 "pznix-start" { }
+    (builtins.readFile ./scripts/start.py);
+  wipeWorldScript = pkgs.writers.writePython3 "pznix-wipe-world" { }
+    (builtins.readFile ./scripts/wipe_world.py);
+  updateCheckScript = pkgs.writers.writePython3 "pznix-update-check" { }
+    (builtins.readFile ./scripts/update_check.py);
+
   portSubmodule = types.submodule {
     options = {
       port = mkOption {
@@ -80,7 +95,7 @@ let
           Group this instance runs as. Defaults to a single shared "pznix" group across every
           server. each server's dataDir is 0750 (owner + group readable/traversable), so sharing one group means every
           pznix-managed server's own process can read into every other one's dataDir too,
-          including the plaintext join password in <servername>.ini. Not a risk from unrelated
+          including the plaintext join/RCON passwords in <servername>.ini. Not a risk from unrelated
           system users, but it does mean pzservers aren't isolated from each other. Give each server its own distinct
           group (e.g."pznix-''${name}") for full multi server isolation.
         '';
@@ -122,6 +137,76 @@ let
         type = types.bool;
         default = true;
         description = "When true, run steamcmd validate+update on every service start.";
+      };
+
+      autoUpdateCheckTime = mkOption {
+        type = types.nullOr types.str;
+        default = "04:00";
+        description = ''
+          systemd OnCalendar expression (e.g. "04:00" for daily at 4am, equivalently
+          "*-*-* 04:00:00", or "Sun 04:00" for weekly) on which this instance is automatically
+          restarted to pick up new game/Workshop updates - reuses the same steamcmd
+          validate+update preStart logic that already runs on every service start, so on a day
+          with nothing new upstream this is a fast no-op, not a fresh download. Only takes effect
+          when autoUpdate = true; set to null to disable proactive checking (updates then only
+          apply whenever the service happens to start/restart on its own, e.g. after a crash or
+          reboot). Restarting briefly disconnects any connected players - pick your server's
+          low-traffic hours. See systemd.time(7) for the full calendar syntax.
+        '';
+      };
+
+      rconPort = mkOption {
+        type = types.port;
+        default = 27015;
+        description = ''
+          RCON port (<servername>.ini RCONPort=) - PZ's remote-admin-console protocol. Used by
+          this module (only when rconPasswordFile is set) to broadcast in-game warnings via
+          servermsg before an autoUpdateCheckTime restart - see restartWarningTimes. Always
+          written to the ini regardless of rconPasswordFile, same as PZ's own default (RCON stays
+          disabled as long as RCONPassword is empty). Every instance defaults to the same port -
+          like ports.game, give each a distinct one if running more than one server on this
+          host. Deliberately never added to openFirewall: RCON is full remote admin access with
+          no separate permission levels, this module only ever dials it over localhost, and it
+          should never be reachable from outside this host.
+        '';
+      };
+
+      rconPasswordFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Path to a file containing the RCON password (<servername>.ini RCONPassword=). Null (the
+          default) leaves RCON disabled, matching PZ's own behavior for an empty RCONPassword.
+          Must be readable by this instance's `user` - e.g. with sops-nix, set the secret's
+          `owner` to match. Setting this is what enables the in-game warnings described under
+          restartWarningTimes below; it also just works as an ordinary RCON credential if you
+          want to connect yourself with any Source-RCON-compatible client for manual
+          administration.
+        '';
+      };
+
+      restartWarningTimes = mkOption {
+        type = types.listOf types.ints.unsigned;
+        default = [ 300 60 10 ];
+        description = ''
+          Seconds before an autoUpdateCheckTime restart to broadcast an in-game warning via
+          RCON's servermsg command - one message per offset here, largest first, e.g. the
+          default [300 60 10] warns at 5 minutes, 1 minute, and 10 seconds before the restart
+          actually happens. Empty list sends no warnings. Only takes effect when
+          rconPasswordFile is set - without RCON credentials there's no channel to send a
+          warning through, so a scheduled restart just happens immediately and silently, same as
+          before this option existed.
+        '';
+      };
+
+      restartWarningMessage = mkOption {
+        type = types.str;
+        default = "Server restarting for updates in %s - please find a safe spot!";
+        description = ''
+          Warning message broadcast in-game (via RCON servermsg) before an autoUpdateCheckTime
+          restart, once per configured restartWarningTimes offset. "%s" is replaced with a
+          human-readable countdown for that offset (e.g. "5 minutes", "10 seconds").
+        '';
       };
 
       joinPasswordFile = mkOption {
@@ -247,12 +332,30 @@ let
         default = 10;
         description = "Seconds to wait before restarting after a crash.";
       };
+
+      startTimeoutSec = mkOption {
+        type = types.str;
+        default = "30min";
+        description = ''
+          systemd TimeoutStartSec for this instance's service - how long systemd waits for
+          preStart (steamcmd install/update, plus every configured Workshop item's download) and
+          the server's own startup before giving up and killing it as failed. systemd's own
+          default (90s) is nowhere near enough for a modded install - and since autoUpdate
+          re-validates/re-downloads everything on every start by default, not just the first,
+          undersizing this risks a start-fail loop on every restart, not just initial setup.
+          Accepts systemd time-span syntax (e.g. "30min", "1h", plain seconds) or "infinity" to
+          disable the timeout entirely (not recommended - a genuinely hung steamcmd/JVM process
+          would then never get killed automatically).
+        '';
+      };
     };
   };
 
-  # Everything needed to build one instance's systemd unit + tmpfiles rules, given its resolved
+  # Everything needed to build one instance's systemd units + tmpfiles rules, given its resolved
   # submodule config `s` and its attribute name.
   mkServer = name: s: rec {
+    unitName = "pznix-${name}";
+
     ini = "${s.dataDir}/Zomboid/Server/${s.serverName}.ini";
     lua = "${s.dataDir}/Zomboid/Server/${s.serverName}_SandboxVars.lua";
     adminAnswers = "${s.dataDir}/.admin-answers";
@@ -261,56 +364,90 @@ let
     # Confirmed against a live server's actual layout - it's Zomboid/db/<name>.db, a plain file
     # directly under Zomboid/db/, NOT nested under Saves/Multiplayer/<name>/ (that was wrong).
     worldDb = "${s.dataDir}/Zomboid/db/${s.serverName}.db";
+    # The actual map/world save (chunk data, structures, zombie population) - separate from
+    # worldDb above, which holds accounts and player character data. Both need clearing to
+    # generate a genuinely fresh world; see wipeWorldUnit below.
+    savesDir = "${s.dataDir}/Zomboid/Saves/Multiplayer/${s.serverName}";
     # Where steamcmd's +workshop_download_item lands content - used to verify each item
     # actually downloaded, since steamcmd is known to sometimes exit 0 on a failed/partial
     # download rather than a nonzero status - and to auto-discover which Mod IDs to enable
     # (each item's mods/<ModID> subdirectory name) without maintaining a separate list.
     workshopContentDir = "${s.dataDir}/steamapps/workshop/content/${workshopAppId}";
-    # Persisted, one ID per line: the fully resolved (collectionIds expanded + workshopItems)
-    # and *verified-downloaded* set of Workshop item IDs from the most recent successful
-    # preStart resolution. Read back on every start (even one where autoUpdate skipped
-    # re-resolving) to populate the ini's WorkshopItems= and to know what to scan for mods.
-    workshopIdsFile = "${s.dataDir}/.workshop-items";
-    # Persisted, semicolon-joined: the derived Mods= value (auto-discovered mods from
-    # workshopIdsFile's content, plus `mods`, minus `excludeMods`). Same persist-and-reread
-    # reasoning as workshopIdsFile.
-    derivedModsFile = "${s.dataDir}/.derived-mods";
+    # Persisted, JSON list: the fully resolved (collectionIds expanded + workshopItems) and
+    # *verified-downloaded* set of Workshop item IDs from the most recent successful preStart
+    # resolution. Read back on every start (even one where autoUpdate skipped re-resolving) to
+    # populate the ini's WorkshopItems= and to know what to scan for mods.
+    workshopIdsFile = "${s.dataDir}/.workshop-items.json";
+    # Persisted, JSON object of id -> time_updated: the Steam Workshop last-modified timestamp
+    # we last confirmed each item was downloaded at. Lets prestart.py's resolve_and_download
+    # skip steamcmd entirely for an item whose upstream time_updated hasn't moved since - see
+    # its docstring for the full story.
+    workshopTimesFile = "${s.dataDir}/.workshop-times.json";
 
     # --- <servername>.ini ---
-    # PauseEmpty/SaveWorldEveryMinutes are the only ini settings this module models directly
-    # (they affect this module's own behavior, not just gameplay). Everything else - PVP,
-    # MaxPlayers, Public, safehouses, etc - goes through extraIniSettings; see its option
+    # PauseEmpty/SaveWorldEveryMinutes/RCONPort are the only ini settings this module models
+    # directly (they affect this module's own behavior, not just gameplay). Everything else -
+    # PVP, MaxPlayers, Public, safehouses, etc - goes through extraIniSettings; see its option
     # description and the README for a full example.
     namedIniSettings = {
       PauseEmpty = boolStr s.pauseWhenEmpty;
       SaveWorldEveryMinutes = toString s.saveIntervalMinutes;
+      RCONPort = toString s.rconPort;
     };
     # Mods/WorkshopItems are deliberately excluded here even if set via extraIniSettings -
     # both are exclusively owned by the dedicated mods/workshopItems/collectionIds options
-    # now, computed at runtime in preStart (see workshopIdsFile/derivedModsFile above): unlike
-    # everything else in iniSettings, neither is knowable at Nix eval time, since Mods depends
-    # on what's actually discovered under downloaded Workshop content and WorkshopItems
-    # depends on collectionIds resolution.
+    # now, computed at runtime in prestart.py (see workshopIdsFile above): unlike everything
+    # else in iniSettings, neither is knowable at Nix eval time, since Mods depends on what's
+    # actually discovered under downloaded Workshop content and WorkshopItems depends on
+    # collectionIds resolution.
     iniSettings = removeAttrs (namedIniSettings // s.extraIniSettings) [ "Mods" "WorkshopItems" ];
+    # ini keys prestart.py owns outright - stripped from any pre-existing ini before it rewrites
+    # them, so a key removed from config (or a stale RCONPassword left over from before
+    # rconPasswordFile was set) doesn't linger forever.
     iniManagedKeys = (optional (s.joinPasswordFile != null) "Password")
+      ++ (optional (s.rconPasswordFile != null) "RCONPassword")
       ++ [ "Mods" "WorkshopItems" ]
       ++ (builtins.attrNames iniSettings);
-    iniKeepFilter = concatStringsSep "|" iniManagedKeys;
-    # Shell-quoted "KEY=VALUE" words, one per printf arg in preStart - deliberately not a
-    # heredoc, since Nix's multi-line-string dedent doesn't play well with those.
-    iniStaticArgs = concatMapStringsSep " " escapeShellArg
-      (mapAttrsToList (k: v: "${k}=${v}") iniSettings);
 
     # --- <servername>_SandboxVars.lua ---
     # This module doesn't model any sandbox/difficulty settings directly - it's all
     # extraSandboxSettings (see its option description and the README for a full example).
-    # sandboxSettings can legitimately be empty (nothing set), which iniKeepFilter above never
-    # is (it always has at least Password/PauseEmpty/SaveWorldEveryMinutes) - the awk rule below
-    # is written to tolerate that.
     sandboxSettings = s.extraSandboxSettings;
-    sandboxKeyFilter = concatStringsSep "|" (builtins.attrNames sandboxSettings);
-    sandboxPrintStmts = concatStringsSep " "
-      (mapAttrsToList (k: v: ''print "    ${k} = ${v},";'') sandboxSettings);
+
+    # However long update_check.py's warning countdown runs before it actually restarts -
+    # the largest configured restartWarningTimes offset (the first warning fires immediately,
+    # the restart lands exactly that many seconds later), or 0 with no warnings configured.
+    # Nix-side only because TimeoutStartSec has to be known before the script ever runs.
+    maxWarningSec =
+      if s.restartWarningTimes == [ ] then 0
+      else foldl' (a: b: if b > a then b else a) 0 s.restartWarningTimes;
+
+    # Single source of truth for every per-instance value the Python scripts need - see each
+    # script's own docstring for how it's used. Kept as one file (rather than one per script) so
+    # there's exactly one place that has to stay in sync with what the scripts actually read.
+    configFile = pkgs.writeText "${unitName}-config.json" (builtins.toJSON {
+      inherit unitName;
+      inherit (s) serverName appId autoUpdate rconPort;
+      inherit workshopAppId;
+      dataDir = toString s.dataDir;
+      steamcmdBin = "${pkgs.steamcmd}/bin/steamcmd";
+      systemctlBin = "${pkgs.systemd}/bin/systemctl";
+      workshopItems = s.workshopItems;
+      collectionIds = s.collectionIds;
+      mods = s.mods;
+      excludeMods = s.excludeMods;
+      inherit iniSettings iniManagedKeys sandboxSettings;
+      paths = {
+        inherit ini lua adminAnswers worldDb savesDir;
+        inherit workshopContentDir workshopIdsFile workshopTimesFile;
+      };
+      joinPasswordFile =
+        if s.joinPasswordFile == null then null else toString s.joinPasswordFile;
+      adminPasswordFile = toString s.adminPasswordFile;
+      rconPasswordFile =
+        if s.rconPasswordFile == null then null else toString s.rconPasswordFile;
+      inherit (s) restartWarningTimes restartWarningMessage extraArgs;
+    });
 
     tmpfilesRules = [
       "d ${s.dataDir} 0750 ${s.user} ${s.group} -"
@@ -322,153 +459,18 @@ let
       wants = [ "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
 
-      path = with pkgs; [ coreutils gawk gnugrep gnutar gzip steamcmd curl jq ];
+      # coreutils/gnutar/gzip are for start-server.sh itself (PZ's own vendored script, not
+      # ours) - our own logic no longer shells out to anything via $PATH lookup: steamcmd and
+      # systemctl are both invoked by absolute store path (see configFile above).
+      path = with pkgs; [ coreutils gnutar gzip ];
 
-      environment.HOME = s.dataDir;
+      environment = {
+        HOME = s.dataDir;
+        PZNIX_CONFIG = "${configFile}";
+      };
 
-      preStart = ''
-        if [ "${boolStr s.autoUpdate}" = "true" ] || [ ! -f "${s.dataDir}/.installed" ]; then
-          ${pkgs.steamcmd}/bin/steamcmd +force_install_dir "${s.dataDir}" +login anonymous +app_update ${s.appId} validate +quit
-          ${optionalString (s.workshopItems != [ ] || s.collectionIds != [ ]) ''
-            # Resolves collectionIds + workshopItems into workshopIdsFile and downloads every
-            # item, all in one attempt. Returns failure (without aborting the script - see the
-            # `until` loop below) if any collection fails to resolve or any item fails to
-            # download, so a bad attempt never gets to commit a partial/stale workshopIdsFile.
-            resolve_and_download() {
-              : > "${workshopIdsFile}.tmp"
-              ${concatMapStringsSep "\n      " (id: ''printf '%s\n' ${escapeShellArg id} >> "${workshopIdsFile}.tmp"'') s.workshopItems}
-
-              ${concatMapStringsSep "\n      " (cid: ''
-                # Collections aren't downloadable content themselves - resolve via Steam's
-                # public Web API into member item IDs first. Fail loud (return 1, picked up
-                # by the retry loop) on any HTTP error or a response that doesn't cleanly
-                # resolve, rather than silently treating a bad/inaccessible collection ID as
-                # "zero members".
-                # cid is interpolated bare (not via escapeShellArg) below: both spots are
-                # already inside a bash-quoted string (double quotes for --data-urlencode,
-                # single quotes for the jq program), so wrapping it in shell quotes of its
-                # own would corrupt the surrounding quoting rather than protect it -
-                # collectionIds entries are trusted, admin-authored, plain numeric IDs.
-                ${pkgs.curl}/bin/curl -fsS -X POST "https://api.steampowered.com/ISteamRemoteStorage/GetCollectionDetails/v1/" \
-                  --data-urlencode "collectioncount=1" \
-                  --data-urlencode "publishedfileids[0]=${cid}" \
-                  -o "${s.dataDir}/.collection-details.json" || return 1
-                ${pkgs.jq}/bin/jq -r '
-                  .response.collectiondetails[0] as $c
-                  | if $c.result != 1 then error("collection ${cid} did not resolve (result=" + ($c.result | tostring) + ")")
-                    else ($c.children // [])[].publishedfileid end
-                ' "${s.dataDir}/.collection-details.json" >> "${workshopIdsFile}.tmp" || return 1
-              '') s.collectionIds}
-              rm -f "${s.dataDir}/.collection-details.json"
-
-              sort -u -o "${workshopIdsFile}.tmp" "${workshopIdsFile}.tmp"
-
-              set -- +force_install_dir "${s.dataDir}" +login anonymous
-              while IFS= read -r id; do
-                set -- "$@" +workshop_download_item ${workshopAppId} "$id" validate
-              done < "${workshopIdsFile}.tmp"
-              # steamcmd's own exit code isn't trustworthy (known to report success on a
-              # failed/partial download) - `|| true` here, verify by directory presence below.
-              ${pkgs.steamcmd}/bin/steamcmd "$@" +quit || true
-
-              while IFS= read -r id; do
-                [ -d "${workshopContentDir}/$id" ] || return 1
-              done < "${workshopIdsFile}.tmp"
-
-              mv "${workshopIdsFile}.tmp" "${workshopIdsFile}"
-            }
-
-            attempt=1
-            until resolve_and_download; do
-              if [ "$attempt" -ge 3 ]; then
-                echo "pznix (${s.serverName}): giving up resolving/downloading Workshop items after $attempt attempts" >&2
-                exit 1
-              fi
-              attempt=$((attempt + 1))
-              echo "pznix (${s.serverName}): Workshop resolution/download incomplete, retrying (attempt $attempt/3)..." >&2
-            done
-          ''}
-          touch "${s.dataDir}/.installed"
-        fi
-
-        mkdir -p "$(dirname "${ini}")"
-
-        # --- Mods=/WorkshopItems= (see workshopIdsFile/derivedModsFile above for why these
-        # are computed here instead of in iniStaticArgs) ---
-        ${optionalString (s.mods != [ ] || s.workshopItems != [ ] || s.collectionIds != [ ]) ''
-          {
-            if [ -f "${workshopIdsFile}" ]; then
-              while IFS= read -r id; do
-                if [ -d "${workshopContentDir}/$id/mods" ]; then
-                  for d in "${workshopContentDir}/$id/mods/"*/; do
-                    [ -d "$d" ] && basename "$d"
-                  done
-                fi
-              done < "${workshopIdsFile}"
-            fi
-            ${concatMapStringsSep "\n        " (m: ''printf '%s\n' ${escapeShellArg m}'') s.mods}
-          } | sort -u ${optionalString (s.excludeMods != [ ]) ("| grep -v -x -F " + concatMapStringsSep " " (m: "-e " + escapeShellArg m) s.excludeMods)} \
-            | paste -sd';' - > "${derivedModsFile}.tmp"
-          # paste on an empty selection still exits 0 and produces an empty file - fine, an
-          # empty Mods= is exactly what "auto-discovered nothing" should mean.
-          mv "${derivedModsFile}.tmp" "${derivedModsFile}"
-        ''}
-        mods_line=""
-        [ -f "${derivedModsFile}" ] && mods_line="$(cat "${derivedModsFile}")"
-        workshop_items_line=""
-        [ -f "${workshopIdsFile}" ] && workshop_items_line="$(paste -sd';' "${workshopIdsFile}")"
-
-        # --- <servername>.ini ---
-        ${optionalString (s.joinPasswordFile != null) ''
-          join_pw="$(cat "${s.joinPasswordFile}")"
-        ''}
-        {
-          if [ -f "${ini}" ]; then
-            grep -v -E '^(${iniKeepFilter})=' "${ini}" || true
-          fi
-          ${optionalString (s.joinPasswordFile != null) ''printf 'Password=%s\n' "$join_pw"''}
-          printf 'Mods=%s\n' "$mods_line"
-          printf 'WorkshopItems=%s\n' "$workshop_items_line"
-          printf '%s\n' ${iniStaticArgs}
-        } > "${ini}.tmp"
-        mv "${ini}.tmp" "${ini}"
-
-        # --- <servername>_SandboxVars.lua ---
-        if [ ! -f "${lua}" ]; then
-          printf 'SandboxVars = {\n}\n' > "${lua}"
-        fi
-        awk '
-          /^[ \t]*SandboxVars[ \t]*=[ \t]*\{/ { print; ${sandboxPrintStmts} next }
-          ${optionalString (sandboxSettings != { }) ''/^[ \t]*(${sandboxKeyFilter})[ \t]*=/ { next }''}
-          { print }
-        ' "${lua}" > "${lua}.tmp"
-        mv "${lua}.tmp" "${lua}"
-
-        # --- admin account bootstrap answers (PZ asks twice: enter, then confirm) ---
-        # Only actually needed the very first time the world's db is created - PZ only prompts
-        # for this once. Written unconditionally anyway (cheap, mode 0600 owner-only, and
-        # rewritten fresh every start), but only actually fed to the server's stdin when the
-        # world db doesn't exist yet - see script below.
-        admin_pw="$(cat "${s.adminPasswordFile}")"
-        ( umask 077; printf '%s\n%s\n' "$admin_pw" "$admin_pw" > "${adminAnswers}" )
-      '';
-
-      script = ''
-        cd "${s.dataDir}"
-        # PZ only prompts for the admin password on stdin the *first* time it creates the
-        # world's db (zombie.network.ServerWorldDatabase) - once that db file exists, it won't
-        # prompt again. Feeding the answers file unconditionally on every start (as this used
-        # to) meant that on every restart *after* the first, those two leftover lines got read
-        # by PZ's general server-console command reader instead and logged verbatim to the
-        # journal ("command entered via server console (System.in): '<password>'") - i.e. the
-        # real admin password in plaintext in the log, every restart, forever. Only redirect
-        # stdin from the answers file when the db doesn't exist yet.
-        if [ -f "${worldDb}" ]; then
-          exec ./start-server.sh -servername ${escapeShellArg s.serverName} ${escapeShellArgs s.extraArgs} < /dev/null
-        else
-          exec ./start-server.sh -servername ${escapeShellArg s.serverName} ${escapeShellArgs s.extraArgs} < "${adminAnswers}"
-        fi
-      '';
+      preStart = "exec ${prestartScript}";
+      script = "exec ${startScript}";
 
       serviceConfig = {
         Type = "simple";
@@ -478,6 +480,7 @@ let
 
         Restart = "on-failure";
         RestartSec = s.restartSec;
+        TimeoutStartSec = s.startTimeoutSec;
 
         StandardOutput = "journal";
         StandardError = "journal";
@@ -512,9 +515,80 @@ let
         ReadWritePaths = [ s.dataDir ];
       };
     };
+
+    # Explicitly-triggered only (`systemctl start pznix-<name>-wipe-world`) - never WantedBy
+    # anything, never runs on its own. Deliberately NOT a config option (e.g.
+    # `wipeWorldOnNextStart = true`): with Restart = "on-failure" on the main unit, a persisted
+    # flag like that risks nuking the world on every crash-restart if you forget to flip it back
+    # off, rather than the one deliberate wipe you meant. `conflicts`+`after` on the main service
+    # means starting this always stops the live server first (never deletes out from under a
+    # running world) and orders the wipe after that stop completes; it deliberately does NOT
+    # restart the main service afterward - `systemctl start pznix-<name>` is a separate,
+    # deliberate step once you're ready to generate the fresh world.
+    wipeWorldUnit = {
+      description = "Wipe saved world data for Project Zomboid dedicated server (${s.serverName}) - DESTRUCTIVE, run manually";
+      conflicts = [ "${unitName}.service" ];
+      after = [ "${unitName}.service" ];
+
+      environment.PZNIX_CONFIG = "${configFile}";
+      script = "exec ${wipeWorldScript}";
+
+      serviceConfig = {
+        Type = "oneshot";
+        User = s.user;
+        Group = s.group;
+
+        # Same rationale as the main unit's sandboxing - restricting writes to just dataDir means
+        # even a mistake here can't reach anywhere outside this instance's own data.
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = [ s.dataDir ];
+      };
+    };
+
+    # Proactive daily(-ish) update check - see autoUpdateCheckTime above. Only actually wired up
+    # (via updateCheckServers below) when autoUpdate is on and autoUpdateCheckTime isn't null;
+    # built unconditionally here regardless since Nix is lazy and it costs nothing on its own.
+    updateCheckTimer = {
+      description = "Timer: check for updates for Project Zomboid dedicated server (${s.serverName})";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = s.autoUpdateCheckTime;
+        Persistent = true; # catch up on a missed run (e.g. host was off) at next boot
+        Unit = "${unitName}-update-check.service";
+      };
+    };
+
+    # try-restart (not restart/start): only acts if the service is already running, so a
+    # currently-stopped instance doesn't get started just to be updated, and there's no one to
+    # warn either - it'll pick up whatever's current the next time it starts on its own anyway,
+    # via the same preStart. Runs as root (the default for a systemd service), since restarting a
+    # *different* unit (and, for the warnings, reading rconPasswordFile) needs privileges this
+    # instance's own unprivileged `user` doesn't have. The warning countdown itself (RCON
+    # servermsg broadcasts, see restartWarningTimes/restartWarningMessage) lives entirely in
+    # update_check.py.
+    updateCheckService = {
+      description = "Check for and apply updates for Project Zomboid dedicated server (${s.serverName})";
+
+      environment.PZNIX_CONFIG = "${configFile}";
+      script = "exec ${updateCheckScript}";
+
+      serviceConfig = {
+        Type = "oneshot";
+        # Generous enough to cover the full warning countdown end-to-end (see maxWarningSec)
+        # plus slack for the restart itself.
+        TimeoutStartSec = "${toString (maxWarningSec + 120)}s";
+      };
+    };
   };
 
   builtServers = mapAttrs mkServer enabledServers;
+
+  # Subset of enabledServers that actually get a daily update-check timer wired up - excludes
+  # anything with autoUpdate = false (nothing for a restart to usefully pick up) or
+  # autoUpdateCheckTime = null (explicitly opted out).
+  updateCheckServers = filterAttrs (_: s: s.autoUpdate && s.autoUpdateCheckTime != null) enabledServers;
 in
 {
   options.services.pznix.servers = mkOption {
@@ -578,6 +652,12 @@ in
         (attrValues enabledServers);
     };
 
-    systemd.services = mapAttrs' (name: built: nameValuePair "pznix-${name}" built.unit) builtServers;
+    systemd.services =
+      (mapAttrs' (name: built: nameValuePair "pznix-${name}" built.unit) builtServers)
+      // (mapAttrs' (name: built: nameValuePair "pznix-${name}-wipe-world" built.wipeWorldUnit) builtServers)
+      // (mapAttrs' (name: _: nameValuePair "pznix-${name}-update-check" builtServers.${name}.updateCheckService) updateCheckServers);
+
+    systemd.timers =
+      mapAttrs' (name: _: nameValuePair "pznix-${name}-update-check" builtServers.${name}.updateCheckTimer) updateCheckServers;
   };
 }
