@@ -109,7 +109,11 @@ def prune_stale_content(content_dir: Path, keep_ids: set[str]) -> None:
     if not content_dir.is_dir():
         return
     for entry in content_dir.iterdir():
-        if entry.is_dir() and entry.name.isdigit() and entry.name not in keep_ids:
+        if (
+            entry.is_dir()
+            and entry.name.isdigit()
+            and entry.name not in keep_ids
+        ):
             shutil.rmtree(entry)
 
 
