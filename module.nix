@@ -321,6 +321,22 @@ let
         '';
       };
 
+      excludeWorkshopItems = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Workshop item IDs to drop from workshopItems/collectionIds resolution entirely, before
+          steamcmd ever sees them. Different from excludeMods: that only stops an
+          already-*downloaded* item's mod from being enabled in Mods=, so it can't help when the
+          item itself can't be downloaded at all - a collection doesn't stop listing a member
+          just because it went private or got taken down (steamcmd then fails it with "Access
+          Denied"), and this module treats any Workshop item it can't confirm downloaded as a
+          fatal error, by design (see workshopItems). Without this, one dead collection member
+          fails every single start, forever. Add its ID here to keep the rest of the collection
+          auto-syncing while you sort out a replacement (or confirm it's gone for good).
+        '';
+      };
+
       extraArgs = mkOption {
         type = types.listOf types.str;
         default = [ ];
@@ -434,6 +450,7 @@ let
       systemctlBin = "${pkgs.systemd}/bin/systemctl";
       workshopItems = s.workshopItems;
       collectionIds = s.collectionIds;
+      excludeWorkshopItems = s.excludeWorkshopItems;
       mods = s.mods;
       excludeMods = s.excludeMods;
       inherit iniSettings iniManagedKeys sandboxSettings;

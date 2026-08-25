@@ -124,6 +124,7 @@ def resolve_and_download(cfg: dict) -> None:
     ids = set(cfg["workshopItems"])
     for cid in cfg["collectionIds"]:
         ids |= set(resolve_collection(cid))
+    ids -= set(cfg["excludeWorkshopItems"])
     ids = sorted(ids)
 
     new_times = fetch_time_updated(ids)
