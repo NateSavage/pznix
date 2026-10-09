@@ -387,7 +387,8 @@ let
     # Where steamcmd's +workshop_download_item lands content - used to verify each item
     # actually downloaded, since steamcmd is known to sometimes exit 0 on a failed/partial
     # download rather than a nonzero status - and to auto-discover which Mod IDs to enable
-    # (each item's mods/<ModID> subdirectory name) without maintaining a separate list.
+    # (the id= of each mod.info under the item's mods/ directory) without maintaining a
+    # separate list.
     workshopContentDir = "${s.dataDir}/steamapps/workshop/content/${workshopAppId}";
     # Persisted, JSON list: the fully resolved (collectionIds expanded + workshopItems) and
     # *verified-downloaded* set of Workshop item IDs from the most recent successful preStart

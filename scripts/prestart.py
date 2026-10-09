@@ -261,6 +261,21 @@ def placate_advanced_animator(cfg: dict) -> None:
                     (target / "_pznix_placeholder.txt").touch()
 
 
+def mod_info_ids(mod_dir: Path) -> set[str]:
+    # PZ identifies a mod by the id= line of its mod.info, which can differ
+    # from the folder name. Build 41 mods keep mod.info in the mod folder;
+    # Build 42 mods keep it in a version subfolder such as 42 or 42.0.
+    ids: set[str] = set()
+    for info in [mod_dir / "mod.info", *mod_dir.glob("*/mod.info")]:
+        if not info.is_file():
+            continue
+        for line in info.read_text(errors="replace").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "id" and value.strip():
+                ids.add(value.strip())
+    return ids
+
+
 def derive_mods(cfg: dict) -> list[str]:
     ids_path = Path(cfg["paths"]["workshopIdsFile"])
     ids = json.loads(ids_path.read_text()) if ids_path.exists() else []
@@ -270,9 +285,9 @@ def derive_mods(cfg: dict) -> list[str]:
     for item_id in ids:
         mods_dir = content_dir / item_id / "mods"
         if mods_dir.is_dir():
-            discovered.update(
-                p.name for p in mods_dir.iterdir() if p.is_dir()
-            )
+            for mod_dir in mods_dir.iterdir():
+                if mod_dir.is_dir():
+                    discovered.update(mod_info_ids(mod_dir))
 
     exclude = set(cfg["excludeMods"])
     return sorted((discovered | set(cfg["mods"])) - exclude)
